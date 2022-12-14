@@ -66,6 +66,27 @@ class _WorkItem(object):
     __class_getitem__ = classmethod(types.GenericAlias)
 
 
+class _WorkItemF(object):
+    def __init__(self, future, fn, args, kwargs):
+        self.future = future
+        self.fn = fn
+        self.args = args
+        self.kwargs = kwargs
+
+    def run(self):
+        if not self.future.set_running_or_notify_cancel():
+            return
+
+        try:
+            self.fn(self.future, *self.args, **self.kwargs)
+        except BaseException as exc:
+            self.future.set_exception(exc)
+            # Break a reference cycle with the exception 'exc'
+            self = None
+
+    __class_getitem__ = classmethod(types.GenericAlias)
+
+
 def _worker(executor_reference, work_queue, initializer, initargs):
     if initializer is not None:
         try:
@@ -176,6 +197,24 @@ class ThreadPoolExecutor(_base.Executor):
             self._adjust_thread_count()
             return f
     submit.__doc__ = _base.Executor.submit.__doc__
+
+    def submit_f(self, fn, /, *args, **kwargs):
+        with self._shutdown_lock, _global_shutdown_lock:
+            if self._broken:
+                raise BrokenThreadPool(self._broken)
+
+            if self._shutdown:
+                raise RuntimeError('cannot schedule new futures after shutdown')
+            if _shutdown:
+                raise RuntimeError('cannot schedule new futures after '
+                                   'interpreter shutdown')
+
+            f = _base.Future()
+            w = _WorkItemF(f, fn, args, kwargs)
+
+            self._work_queue.put(w)
+            self._adjust_thread_count()
+            return f
 
     def _adjust_thread_count(self):
         # if idle threads are available, don't spin new threads
